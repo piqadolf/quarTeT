@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-# Last modified: V1.2.4
+# file: gap_filler.py
 
 import sys
 import argparse
@@ -8,126 +7,271 @@ import os
 import re
 import quartet_util
 
+
+_FLANK_ID_RE = re.compile(r"^(?P<sid>.+)\.(?P<gapidx>\d+)\.(?P<lr>[LR])$")
+
+
+def _parse_flank_qryid(qryid: str) -> tuple[str, str, str]:
+    """
+    Parse flanking fasta IDs generated as: {sid}.{i}.L / {sid}.{i}.R
+
+    Returns:
+        sid (chrom/contig id in draft), gapid ("sid.i"), LR ("L"/"R")
+    """
+    m = _FLANK_ID_RE.match(qryid)
+    if not m:
+        raise ValueError(f"Unexpected flanking query id format: {qryid}")
+    sid = m.group("sid")
+    gapidx = m.group("gapidx")
+    lr = m.group("lr")
+    return sid, f"{sid}.{gapidx}", lr
+
+
+def _infer_ref_chrom(refid: str, draft_ids: set[str]) -> str | None:
+    """
+    Infer the chromosome/contig in the gap-filling assembly for refid.
+
+    This assumes ref headers contain the chromosome name as:
+      - exact match (refid == 'chr1'), OR
+      - prefix match with a delimiter: 'chr1_...', 'chr1|...', 'chr1....', etc.
+
+    Returns:
+        chromosome id (must be in draft_ids) or None if cannot infer.
+    """
+    # Common "first token" patterns
+    token = refid.split()[0]
+    token = token.split("|", 1)[0]
+
+    if token in draft_ids:
+        return token
+
+    # Prefix match against draft ids using typical delimiters
+    delimiters = ("|", "_", ".", ":", "-", "/")
+    # Prefer longer ids first to avoid matching "chr1" before "chr10"
+    for sid in sorted(draft_ids, key=len, reverse=True):
+        for d in delimiters:
+            if refid.startswith(sid + d):
+                return sid
+
+    return None
+
+
 ### MAIN PROGRAM ###
 def GapFiller(args):
-    draftgenomefile, gapclosercontigfilelist, flanking, minalignmentlength2, minalignmentidentity2, maxfillinglen, prefix, threads, minimapoption, overwrite, enablejoin, joinonly, noplot, aligner = args
+    (
+        draftgenomefile,
+        gapclosercontigfilelist,
+        flanking,
+        minalignmentlength2,
+        minalignmentidentity2,
+        maxfillinglen,
+        prefix,
+        threads,
+        minimapoption,
+        overwrite,
+        enablejoin,
+        joinonly,
+        noplot,
+        aligner,
+    ) = args
 
     # get gap's flanking seq
-    print('[Info] Getting gaps flanking sequence...')
+    print("[Info] Getting gaps flanking sequence...")
     draftgenomedict = quartet_util.readFastaAsDict(draftgenomefile)
+    draft_ids = set(draftgenomedict.keys())
+
     flankingdict = {}
     gapdict = {}
+
     for sid, seq in draftgenomedict.items():
-        if 'N'*100 in seq:
+        if "N" * 100 in seq:
             i = 1
-            gapsitelist = [r.span() for r in re.finditer(r'N+', seq)]
+            gapsitelist = [r.span() for r in re.finditer(r"N+", seq)]
             for gapsite in gapsitelist:
                 start = max(gapsite[0] - flanking, 0)
                 end = min(gapsite[1] + flanking, len(seq))
                 leftseq = seq[start:gapsite[0]]
                 rightseq = seq[gapsite[1]:end]
-                if 'N'*100 in leftseq or 'N'*100 in rightseq:
-                    print(f'[Warning] Flanking sequence of gap {sid}.{i} contains another gap. This indicates two gaps are too close and a very small contig is placed in between.')
+                if "N" * 100 in leftseq or "N" * 100 in rightseq:
+                    print(
+                        f"[Warning] Flanking sequence of gap {sid}.{i} contains another gap. "
+                        "This indicates two gaps are too close and a very small contig is placed in between."
+                    )
                 else:
-                    flankingdict[f'{sid}.{i}.L'] = seq[start:gapsite[0]]
-                    flankingdict[f'{sid}.{i}.R'] = seq[gapsite[1]:end]
-                gapdict[f'{sid}.{i}'] = seq[gapsite[0]:gapsite[1]]
+                    flankingdict[f"{sid}.{i}.L"] = seq[start:gapsite[0]]
+                    flankingdict[f"{sid}.{i}.R"] = seq[gapsite[1]:end]
+                gapdict[f"{sid}.{i}"] = seq[gapsite[0]:gapsite[1]]
                 i += 1
+
     if flankingdict == {}:
-        print('[Error] Input genome does not have valid gap.')
+        print("[Error] Input genome does not have valid gap.")
         sys.exit(0)
-    subprocess.run(f'mkdir tmp', stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=True)
-    flankingfastafile = f'tmp/{prefix}.gap.flanking.fasta'
-    with open(flankingfastafile, 'w') as f:
+
+    os.makedirs("tmp", exist_ok=True)
+
+    flankingfastafile = f"tmp/{prefix}.gap.flanking.fasta"
+    with open(flankingfastafile, "w") as f:
         for sid, seq in flankingdict.items():
-            f.write(f'>{sid}\n{seq}\n')
+            f.write(f">{sid}\n{seq}\n")
     del draftgenomedict
-    
+
     # process gapfilling file(s)
     gapcloserdict = {}
     for gapfillfile in gapclosercontigfilelist:
         gapfiller = os.path.basename(gapfillfile)
-        print(f'[Info] gapfilling with {gapfiller}...')
+        print(f"[Info] gapfilling with {gapfiller}...")
         gapfillfasta = quartet_util.readFastaAsDict(gapfillfile)
-        
+
         # If gapfiller itself has gap, split it
         gapfilldict = {}
         needsplit = False
         for sid, seq in gapfillfasta.items():
-            if 'N'*100 in seq:
+            if "N" * 100 in seq:
                 needsplit = True
                 i = 1
-                for tig in re.split(r'N{100,}', seq):
-                    gapfilldict[f'{sid}_tig{i}'] = tig
+                for tig in re.split(r"N{100,}", seq):
+                    gapfilldict[f"{sid}_tig{i}"] = tig
                     i += 1
             else:
                 gapfilldict[sid] = seq
         if needsplit:
-            print(f'[Info] Gaps found in {gapfiller}. Split it to contigs.')
-            gapfillfile = f'tmp/{gapfiller}.splitcontig.fasta'
-            with open(gapfillfile, 'w') as c:
+            print(f"[Info] Gaps found in {gapfiller}. Split it to contigs.")
+            gapfillfile = f"tmp/{gapfiller}.splitcontig.fasta"
+            with open(gapfillfile, "w") as c:
                 for tigid, seq in gapfilldict.items():
-                    c.write(f'>{tigid}\n{seq}\n')
+                    c.write(f">{tigid}\n{seq}\n")
             gapfillfasta = gapfilldict
 
-        # reduce memory 
-        with open(f'tmp/{prefix}.gapfillfasta.fasta', 'w') as tmpgapfillfasta:
+        # reduce memory
+        tmp_gapfill_path = f"tmp/{prefix}.gapfillfasta.fasta"
+        with open(tmp_gapfill_path, "w") as tmpgapfillfasta:
             for sid, seq in gapfillfasta.items():
-                tmpgapfillfasta.write(f'>{sid}\n{seq}\n')
+                tmpgapfillfasta.write(f">{sid}\n{seq}\n")
         del gapfillfasta
         del gapfilldict
 
-        pafgapfillfile = quartet_util.minimap(gapfillfile, flankingfastafile, prefix, f'flank_map_{gapfiller}', minimapoption, False, overwrite, aligner)
+        pafgapfillfile = quartet_util.minimap(
+            gapfillfile,
+            flankingfastafile,
+            prefix,
+            f"flank_map_{gapfiller}",
+            minimapoption,
+            False,
+            overwrite,
+            aligner,
+        )
 
         allalignment = []
-        with open(pafgapfillfile, 'r') as paf:
+        with open(pafgapfillfile, "r") as paf:
             for line in paf:
                 if len(line.split()) < 11:
                     continue
                 qryid, qrylen, qrystart, qryend, strand, refid, reflen, refstart, refend, match, alignlen = line.split()[:11]
+
+                try:
+                    gap_chrom, gapid, lr = _parse_flank_qryid(qryid)
+                except ValueError:
+                    # Not a flanking id we generated; ignore.
+                    continue
+
+                ref_chrom = _infer_ref_chrom(refid, draft_ids)
+                if ref_chrom is None:
+                    # Enforce "same chromosome only": if we can't infer, we do NOT allow it.
+                    continue
+
                 if int(alignlen) >= minalignmentlength2 and int(match) / int(alignlen) >= minalignmentidentity2:
-                    allalignment.append({'qryid': qryid, 'qrylen': int(qrylen), 'qrystart': int(qrystart) + 1, 'qryend': int(qryend), 'strand': strand, 
-                                         'refid': refid, 'reflen': int(reflen), 'refstart': int(refstart) + 1, 'refend': int(refend), 
-                                         'match': int(match), 'alignlen': int(alignlen), 'identity': int(match) / int(alignlen),
-                                         'gapid': '.'.join(qryid.split('.')[:-1]), 'LR': qryid.split('.')[-1]})
+                    allalignment.append(
+                        {
+                            "qryid": qryid,
+                            "qrylen": int(qrylen),
+                            "qrystart": int(qrystart) + 1,
+                            "qryend": int(qryend),
+                            "strand": strand,
+                            "refid": refid,
+                            "reflen": int(reflen),
+                            "refstart": int(refstart) + 1,
+                            "refend": int(refend),
+                            "match": int(match),
+                            "alignlen": int(alignlen),
+                            "identity": int(match) / int(alignlen),
+                            "gapid": gapid,
+                            "gapchrom": gap_chrom,
+                            "refchrom": ref_chrom,
+                            "LR": lr,
+                        }
+                    )
+
         if allalignment == []:
-            print(f'[Info] No alignment for this file.')
+            print("[Info] No alignment for this file.")
             continue
-        
+
         # process each gap
-        print(f'[Info] Analysising Alignments...')
-        gapfillfasta = quartet_util.readFastaAsDict(f'tmp/{prefix}.gapfillfasta.fasta')
+        print("[Info] Analysising Alignments...")
+        gapfillfasta = quartet_util.readFastaAsDict(tmp_gapfill_path)
+
         for gapid in gapdict:
-            Leftanchor = [aln for aln in allalignment if aln['gapid'] == gapid and aln['LR'] == 'L']
-            Rightanchor = [aln for aln in allalignment if aln['gapid'] == gapid and aln['LR'] == 'R']
+            # gap chromosome == draft sequence id (everything before the last ".<idx>")
+            # works even if sid had dots originally, because gapid is "{sid}.{idx}" where idx is numeric
+            m = re.match(r"^(?P<sid>.+)\.(?P<idx>\d+)$", gapid)
+            if not m:
+                continue
+            gap_chrom = m.group("sid")
+
+            Leftanchor = [
+                aln
+                for aln in allalignment
+                if aln["gapid"] == gapid and aln["LR"] == "L" and aln["gapchrom"] == gap_chrom and aln["refchrom"] == gap_chrom
+            ]
+            Rightanchor = [
+                aln
+                for aln in allalignment
+                if aln["gapid"] == gapid and aln["LR"] == "R" and aln["gapchrom"] == gap_chrom and aln["refchrom"] == gap_chrom
+            ]
+
             if Leftanchor == [] or Rightanchor == []:
                 continue
-            # score each pair
-            anchorpair = [(Laln, Raln) for Laln in Leftanchor for Raln in Rightanchor if Laln['refid'] == Raln['refid'] and Laln['strand'] == Raln['strand']]
+
+            # score each pair (same contig + same strand already; also guaranteed same chromosome by refchrom filter)
+            anchorpair = [
+                (Laln, Raln)
+                for Laln in Leftanchor
+                for Raln in Rightanchor
+                if Laln["refid"] == Raln["refid"] and Laln["strand"] == Raln["strand"]
+            ]
             if anchorpair == []:
                 continue
-            bestscore = gapcloserdict[gapid]['score'] if gapid in gapcloserdict else 0
+
+            bestscore = gapcloserdict[gapid]["score"] if gapid in gapcloserdict else 0
             for Laln, Raln in anchorpair:
-                if Laln['strand'] == '-':
+                if Laln["strand"] == "-":
                     Laln, Raln = Raln, Laln
-                if Laln['refend'] < Raln['refstart'] and joinonly != True:
-                    score = (Laln['identity'] + Raln['identity']) / 2
+
+                if Laln["refend"] < Raln["refstart"] and joinonly != True:
+                    score = (Laln["identity"] + Raln["identity"]) / 2
                     if score > bestscore:
-                        fillstart = Laln['refend'] + Laln['qrylen'] - Laln['qryend'] + 1
-                        fillend = Raln['refstart'] - Raln['qrystart']
-                        fillseq = gapfillfasta[Laln['refid']][fillstart-1:fillend]
-                        if len(fillseq) > maxfillinglen or fillseq == '':
+                        fillstart = Laln["refend"] + Laln["qrylen"] - Laln["qryend"] + 1
+                        fillend = Raln["refstart"] - Raln["qrystart"]
+                        fillseq = gapfillfasta[Laln["refid"]][fillstart - 1 : fillend]
+                        if len(fillseq) > maxfillinglen or fillseq == "":
                             continue
-                        gapcloserdict[gapid] = {'sid': f'{gapfillfile}@{Laln["refid"]}', 'range': f'{fillstart}-{fillend}',
-                                                'seq': fillseq if Laln['strand'] == '+' else quartet_util.reversedseq(fillseq), 'strand': Laln['strand'], 
-                                                'score': score}
-                elif Laln['refend'] >= Raln['refstart'] and enablejoin == True:
+                        gapcloserdict[gapid] = {
+                            "sid": f'{gapfillfile}@{Laln["refid"]}',
+                            "range": f"{fillstart}-{fillend}",
+                            "seq": fillseq if Laln["strand"] == "+" else quartet_util.reversedseq(fillseq),
+                            "strand": Laln["strand"],
+                            "score": score,
+                        }
+
+                elif Laln["refend"] >= Raln["refstart"] and enablejoin == True:
                     if bestscore != 0:
                         continue
-                    else:
-                        gapcloserdict[gapid] = {'sid': f'{gapfillfile}@{Laln["refid"]}', 'range': 'join',
-                                                'seq': '', 'strand': Laln['strand'], 
-                                                'score': (Laln['identity'] + Raln['identity']) / 2}
+                    gapcloserdict[gapid] = {
+                        "sid": f'{gapfillfile}@{Laln["refid"]}',
+                        "range": "join",
+                        "seq": "",
+                        "strand": Laln["strand"],
+                        "score": (Laln["identity"] + Raln["identity"]) / 2,
+                    }
     
     print(f'[Info] All files processed.')
     if gapcloserdict == {}:
