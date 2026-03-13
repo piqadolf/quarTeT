@@ -49,17 +49,21 @@ def AssemblyMapper(args):
     refdict = quartet_util.readFastaAsDict(refgenomefile)
     minchrlen = min([len(y) for x, y in refdict.items()])
     if os.path.exists(telofile):
-        with open(telofile, 'r') as telo:
-            for line in telo:
-                if line.startswith('#'):
-                    continue
-                tigid, tiglen, status = line.split()[0:3]
-                if status == 'both' and int(tiglen) >= minchrlen / 2:
-                    monopolize.append(tigid)
-                elif status == 'left':
-                    forceleft.append(tigid)
-                elif status == 'right':
-                    forceright.append(tigid)
+        pass
+        # with open(telofile, 'r') as telo:
+        #     for line in telo:
+        #         if line.startswith('#'):
+        #             continue
+        #         tigid, tiglen, status = line.split()[0:3]
+        #         if status == 'both' and int(tiglen) >= minchrlen / 2:
+        #             monopolize.append(tigid)
+        #         elif status == 'left':
+        #             forceleft.append(tigid)
+        #         elif status == 'right':
+        #             forceright.append(tigid)
+        # print(f'forceleft {forceleft}')
+        # print(f'forceright {forceright}')
+        # print(f'monopolize {monopolize}')
     else:
         print('[Warning] Cannot identify telomeres in contigs.')
 
